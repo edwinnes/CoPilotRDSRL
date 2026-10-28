@@ -1,0 +1,18 @@
+{
+  "name": "nosotrosrd-backend",
+  "version": "1.0.0",
+  "description": "Backend API y SDUI Server para la App Cliente NosotrosRD (Cloud Run)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "pg": "^8.23.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
