@@ -15,6 +15,9 @@ const {
 
 const { pool } = require('../config/database');
 
+const { removeExpiredPendingClient } =
+  require('../repositories/expiredRegistrationsNeon');
+
 const {
   createClient,
   findByIdentifier
@@ -29,6 +32,24 @@ const {
 } = require('../repositories/authSessionNeon');
 
 const { query } = require('../config/database');
+const {
+  createInitialVerificationCode,
+  verifyEmailCode
+} = require('../repositories/emailVerificationNeon');
+
+const {
+  verifyEmailLimiter,
+  resendVerificationLimiter
+} = require('../middleware/emailVerificationRateLimit');
+
+const {
+  sendVerificationEmail
+} = require('../services/verificationEmailService');
+
+const {
+  resendVerificationCode
+} = require('../services/resendVerificationService');
+
 
 const USERS_FIELDS = `
   id,
@@ -157,6 +178,17 @@ router.post('/api/v1/auth/register', async (req, res) => {
     documentId = result.normalized;
   }
 
+  // Restricción temporal mientras Resend no tenga dominio verificado.
+  if (emailValidation.normalized.toLowerCase() !==
+      'nosotrosrdoficial@gmail.com') {
+    return errorResponse(
+      res,
+      503,
+      'EMAIL_DOMAIN_NOT_VERIFIED',
+      'El registro está limitado al correo autorizado durante las pruebas.'
+    );
+  }
+
   let client;
 
   try {
@@ -164,6 +196,12 @@ router.post('/api/v1/auth/register', async (req, res) => {
 
     client = await pool.connect();
     await client.query('BEGIN');
+
+    // Limpieza y registro dentro de una sola transacción.
+    await removeExpiredPendingClient(
+      client,
+      emailValidation.normalized
+    );
 
     const user = await createClient({
       fullName: nameValidation.normalized,
@@ -173,16 +211,55 @@ router.post('/api/v1/auth/register', async (req, res) => {
       documentId
     }, client);
 
-    const token = await issueSession(user, 'REGISTER', client);
+    const verification = await createInitialVerificationCode(
+      user.id,
+      client
+    );
 
     await client.query('COMMIT');
+    client.release();
+    client = null;
+
+    let delivery;
+
+    try {
+      delivery = await sendVerificationEmail({
+        email: user.email,
+        code: verification.code
+      });
+    } catch (emailError) {
+      console.error('[EMAIL_VERIFICATION_SEND]', {
+        code: emailError.code || 'EMAIL_PROVIDER_ERROR'
+      });
+
+      return errorResponse(
+        res,
+        503,
+        'VERIFICATION_EMAIL_NOT_SENT',
+        'La cuenta fue creada, pero no se pudo enviar el código. Solicita un reenvío.'
+      );
+    }
+
+    if (!delivery.success) {
+      return errorResponse(
+        res,
+        503,
+        'VERIFICATION_EMAIL_NOT_SENT',
+        'La cuenta fue creada, pero no se pudo enviar el código. Solicita un reenvío.'
+      );
+    }
 
     return res.status(201).json({
       success: true,
-      code: 'REGISTRATION_SUCCESS',
-      token,
-      user,
-      message: 'Usuario registrado exitosamente en CoPilotRD.'
+      code: 'EMAIL_VERIFICATION_REQUIRED',
+      requiresVerification: true,
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        status: user.status
+      },
+      message: 'Cuenta creada. Debes verificar tu correo electrónico antes de iniciar sesión.'
     });
 
   } catch (error) {
@@ -196,6 +273,114 @@ router.post('/api/v1/auth/register', async (req, res) => {
     if (client) client.release();
   }
 });
+
+router.post(
+  '/api/v1/auth/verify-email',
+  verifyEmailLimiter,
+  async (req, res) => {
+    const { email, code } = req.body || {};
+
+    if (typeof email !== 'string' ||
+        typeof code !== 'string') {
+      return errorResponse(
+        res, 400, 'MISSING_FIELDS',
+        'Se requieren email y código de verificación.'
+      );
+    }
+
+    const validation = validateEmail(email);
+
+    if (!validation.valid || !/^\d{6}$/.test(code)) {
+      return errorResponse(
+        res, 400, 'INVALID_VERIFICATION_DATA',
+        'Correo o código inválido.'
+      );
+    }
+
+    try {
+      const user = await findByIdentifier(validation.normalized);
+
+      if (!user || user.role !== 'CLIENT') {
+        return errorResponse(
+          res, 400, 'INVALID_VERIFICATION_CODE',
+          'Código inválido o expirado.'
+        );
+      }
+
+      const result = await verifyEmailCode(user.id, code);
+
+      if (!result.success) {
+        return errorResponse(
+          res, 400, 'INVALID_VERIFICATION_CODE',
+          'Código inválido, expirado o sin intentos disponibles.'
+        );
+      }
+
+      return res.json({
+        success: true,
+        code: 'EMAIL_VERIFIED',
+        message: 'Correo verificado correctamente. Ya puedes iniciar sesión.'
+      });
+    } catch (error) {
+      return handleServerError(res, error);
+    }
+  }
+);
+
+router.post(
+  '/api/v1/auth/resend-verification',
+  resendVerificationLimiter,
+  async (req, res) => {
+    const { email } = req.body || {};
+
+    if (typeof email !== 'string') {
+      return errorResponse(
+        res, 400, 'EMAIL_REQUIRED',
+        'Se requiere un correo electrónico válido.'
+      );
+    }
+
+    const validation = validateEmail(email);
+
+    if (!validation.valid) {
+      return errorResponse(
+        res, 400, 'EMAIL_INVALID_FORMAT',
+        'Se requiere un correo electrónico válido.'
+      );
+    }
+
+    const genericResponse = () => res.json({
+      success: true,
+      code: 'VERIFICATION_REQUEST_RECEIVED',
+      message: 'Si la cuenta requiere verificación, se procesará la solicitud.'
+    });
+
+    try {
+      const user = await findByIdentifier(validation.normalized);
+
+      if (!user || user.role !== 'CLIENT' ||
+          user.status !== 'PENDING_VERIFICATION') {
+        return genericResponse();
+      }
+
+      const result = await resendVerificationCode(user.id);
+
+      if (!result.success) {
+        if (result.reason === 'EMAIL_NOT_SENT') {
+          console.error('[RESEND_VERIFICATION]', {
+            code: 'EMAIL_NOT_SENT'
+          });
+        }
+
+        return genericResponse();
+      }
+
+      return genericResponse();
+    } catch (error) {
+      return handleServerError(res, error);
+    }
+  }
+);
 
 router.get('/api/v1/auth/login', (req, res) => {
   return res.json({
@@ -269,7 +454,7 @@ router.post('/api/v1/auth/login', async (req, res) => {
     }
 
     if (user.role !== 'CLIENT' ||
-        !['ACTIVO', 'PENDING_VERIFICATION'].includes(user.status)) {
+        user.status !== 'ACTIVO') {
       return errorResponse(
         res, 403, 'ACCOUNT_NOT_ALLOWED',
         'La cuenta no está habilitada para iniciar sesión.'
