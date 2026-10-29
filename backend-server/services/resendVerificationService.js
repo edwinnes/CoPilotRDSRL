@@ -30,7 +30,7 @@ async function resendVerificationCode(userId) {
     );
 
     const userResult = await client.query(
-      `SELECT id, email, estado
+      `SELECT id, email, estado, creado_en
        FROM public.usuarios
        WHERE id = $1
        FOR UPDATE`,
@@ -43,6 +43,17 @@ async function resendVerificationCode(userId) {
       await client.query('ROLLBACK');
       transactionOpen = false;
       return { success: false, reason: 'NOT_PENDING' };
+    }
+
+    const registeredAt = new Date(user.creado_en).getTime();
+
+    if (
+      !Number.isFinite(registeredAt) ||
+      Date.now() - registeredAt >= 60 * 60 * 1000
+    ) {
+      await client.query('ROLLBACK');
+      transactionOpen = false;
+      return { success: false, reason: 'REGISTRATION_EXPIRED' };
     }
 
     const recent = await client.query(
