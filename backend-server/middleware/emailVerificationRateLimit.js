@@ -23,7 +23,13 @@ const resendVerificationLimiter = rateLimit({
   limit: 5
 });
 
+const loginLimiter = rateLimit({
+  ...commonOptions,
+  limit: 10
+});
+
 module.exports = {
   verifyEmailLimiter,
-  resendVerificationLimiter
+  resendVerificationLimiter,
+  loginLimiter
 };

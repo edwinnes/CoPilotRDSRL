@@ -39,7 +39,8 @@ const {
 
 const {
   verifyEmailLimiter,
-  resendVerificationLimiter
+  resendVerificationLimiter,
+  loginLimiter
 } = require('../middleware/emailVerificationRateLimit');
 
 const {
@@ -392,7 +393,7 @@ router.get('/api/v1/auth/login', (req, res) => {
   });
 });
 
-router.post('/api/v1/auth/login', async (req, res) => {
+router.post('/api/v1/auth/login', loginLimiter, async (req, res) => {
   const body = req.body || {};
   const identifier = body.email || body.identifier || body.phone;
   const password = body.password;
