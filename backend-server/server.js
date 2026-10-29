@@ -44,7 +44,6 @@ const sduiNeonRouter = require('./routes/sduiNeon');
 const authRouter = require('./routes/authNeon');
 const apiV1Router = require('./routes/apiV1');
 const mapsRouter = require('./routes/maps');
-const gptRouter = require('./routes/gpt');
 
 // Endpoint raíz para Cloud Run y health check
 app.get('/', (req, res) => {
@@ -94,7 +93,6 @@ app.use(apiV1Router);
 app.use(sduiNeonRouter);
 app.use(sduiRouter);
 app.use(mapsRouter);
-app.use(gptRouter);
 
 // Iniciar servidor - Escuchando en 0.0.0.0 y puerto configurado
 if (require.main === module) {
