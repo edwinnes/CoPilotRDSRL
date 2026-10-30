@@ -15,8 +15,10 @@ const {
 
 const { pool } = require('../config/database');
 
-const { removeExpiredPendingClient } =
-  require('../repositories/expiredRegistrationsNeon');
+const {
+  removeExpiredPendingClient,
+  findRegistrationStatus
+} = require('../repositories/expiredRegistrationsNeon');
 
 const {
   createClient,
@@ -40,7 +42,8 @@ const {
 const {
   verifyEmailLimiter,
   resendVerificationLimiter,
-  loginLimiter
+  loginLimiter,
+  registerLimiter
 } = require('../middleware/emailVerificationRateLimit');
 
 const {
@@ -104,7 +107,7 @@ router.all('/api/v1/auth/google', (req, res) => {
   );
 });
 
-router.post('/api/v1/auth/register', async (req, res) => {
+router.post('/api/v1/auth/register', registerLimiter, async (req, res) => {
   const body = req.body || {};
 
   const rawEmail = body.email;
@@ -203,6 +206,54 @@ router.post('/api/v1/auth/register', async (req, res) => {
       client,
       emailValidation.normalized
     );
+
+    const existing = await findRegistrationStatus(
+      client,
+      emailValidation.normalized
+    );
+
+    if (existing) {
+      let pendingPasswordMatches = false;
+
+      if (
+        existing.role === 'CLIENT' &&
+        existing.status === 'PENDING_VERIFICATION'
+      ) {
+        const credentials = await client.query(`
+          SELECT password_hash
+          FROM public.usuarios
+          WHERE lower(email) = lower($1)
+            AND rol = 'CLIENT'
+            AND estado = 'PENDING_VERIFICATION'
+          LIMIT 1
+        `, [emailValidation.normalized]);
+
+        pendingPasswordMatches = verifyPassword(
+          password,
+          credentials.rows[0]?.password_hash
+        );
+      }
+
+      await client.query('ROLLBACK');
+      client.release();
+      client = null;
+
+      if (pendingPasswordMatches) {
+        return errorResponse(
+          res,
+          409,
+          'VERIFICATION_PENDING',
+          'Si tienes una verificación pendiente, puedes solicitar un nuevo código.'
+        );
+      }
+
+      return errorResponse(
+        res,
+        409,
+        'USER_ALREADY_EXISTS',
+        'Ya existe una cuenta con los datos proporcionados.'
+      );
+    }
 
     const user = await createClient({
       fullName: nameValidation.normalized,

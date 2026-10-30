@@ -28,8 +28,14 @@ const loginLimiter = rateLimit({
   limit: 10
 });
 
+const registerLimiter = rateLimit({
+  ...commonOptions,
+  limit: 5
+});
+
 module.exports = {
   verifyEmailLimiter,
   resendVerificationLimiter,
-  loginLimiter
+  loginLimiter,
+  registerLimiter
 };

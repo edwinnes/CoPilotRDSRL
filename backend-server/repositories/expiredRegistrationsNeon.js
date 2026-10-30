@@ -65,7 +65,11 @@ async function hasProtectedRelations(client, userId) {
       AND con.confrelid = 'public.usuarios'::regclass
       AND (
           con.confdeltype <> 'c'
-          OR con.conrelid = 'public.user_sessions'::regclass
+          OR con.conrelid IN (
+            'public.user_sessions'::regclass,
+            'public.user_levels'::regclass,
+            'public.notificaciones'::regclass
+          )
         )
       AND array_length(con.conkey, 1) = 1
     ORDER BY con.conrelid::regclass::text, con.conname
@@ -80,8 +84,13 @@ async function hasProtectedRelations(client, userId) {
       throw new Error('Identificador de dependencia inesperado');
     }
 
+    const condition = table === 'user_sessions' ||
+      table === 'public.user_sessions'
+      ? ' AND revocado_en IS NULL AND expira_en > NOW()'
+      : '';
+
     const result = await client.query(
-      `SELECT 1 FROM ${table} WHERE "${column}" = $1 LIMIT 1`,
+      `SELECT 1 FROM ${table} WHERE "${column}" = $1${condition} LIMIT 1`,
       [userId]
     );
 
@@ -111,6 +120,17 @@ async function removeExpiredPendingClient(client, email) {
     return { deleted: false, reason: 'PROTECTED_RELATIONS' };
   }
 
+  // Descartar únicamente sesiones vencidas o revocadas
+  // de este registro pendiente, dentro de la transacción.
+  await client.query(`
+    DELETE FROM public.user_sessions
+    WHERE usuario_id = $1
+      AND (
+        revocado_en IS NOT NULL
+        OR expira_en <= NOW()
+      )
+  `, [candidate.id]);
+
   const result = await client.query(`
     DELETE FROM public.usuarios
     WHERE id = $1
@@ -129,7 +149,30 @@ async function removeExpiredPendingClient(client, email) {
   };
 }
 
+async function findRegistrationStatus(client, email) {
+  if (!client || typeof client.query !== 'function') {
+    throw new TypeError('Se requiere una conexión transaccional');
+  }
+
+  const normalized = String(email || '').trim().toLowerCase();
+  if (!normalized) throw new TypeError('Correo requerido');
+
+  const result = await client.query(`
+    SELECT
+      estado AS status,
+      rol AS role,
+      creado_en AS "registeredAt",
+      NOW() >= creado_en + INTERVAL '1 hour' AS expired
+    FROM public.usuarios
+    WHERE lower(email) = $1
+    LIMIT 1
+  `, [normalized]);
+
+  return result.rows[0] || null;
+}
+
 module.exports = {
   lockRegistrationEmail,
-  removeExpiredPendingClient
+  removeExpiredPendingClient,
+  findRegistrationStatus
 };

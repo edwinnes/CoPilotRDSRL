@@ -149,7 +149,7 @@ async function validateSession(token) {
   if (
     !user ||
     user.role !== verification.role ||
-    !['ACTIVO', 'PENDING_VERIFICATION'].includes(user.status)
+    user.status !== 'ACTIVO'
   ) {
     return { valid: false, error: 'Usuario no autorizado' };
   }
